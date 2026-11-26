@@ -1,13 +1,13 @@
 #!/bin/sh
 
-. /installer/install_func
+INSTALLER_DIR="/installer"
+. ${INSTALLER_DIR}/install_func
 
-# cheks if the lock file exists and if it does, aborts the script
+# checks if the lock file exists and if it does, aborts the script
+# otherwise - grab the lock
 check_lock
 
-BOARD_NAME=$(cat /proc/device-tree/compatible | tr '\0' '\n' | head -1 | tr ',' '_')
 
-INSTALLER_DIR="/installer"
 PRELOADER="$(ls -1 $INSTALLER_DIR/mt7986-*-bl2.img)"
 FIP="$INSTALLER_DIR/mt7986_${BOARD_NAME}-u-boot.fip"
 # Use ls to resolve the wildcard at runtime so the script does not need to
@@ -49,13 +49,13 @@ MTD_FWHDR1=1
 MTD_FWHDR1_OFFSET=36
 MTD_FWHDR1_LEN=1
 
-# firmware1
+# firmware1 (UBI)
 # 400 blocks, 50MiB: OEM firmware/UBI
 MTD_FW1=1
 MTD_FW1_OFFSET=37
 MTD_FW1_LEN=400
 
-# Config1
+# Config1 (UBI)
 # 28 blocks, 3.5MiB: configuration part for firmware1
 MTD_CFG1=1
 MTD_CFG1_OFFSET=437
@@ -67,13 +67,13 @@ MTD_FWHDR2=1
 MTD_FWHDR2_OFFSET=465
 MTD_FWHDR2_LEN=1
 
-# firmware2
+# firmware2 (UBI)
 # 400 blocks, 50MiB: OEM firmware/UBI
 MTD_FW2=1
 MTD_FW2_OFFSET=466
 MTD_FW2_LEN=400
 
-# Config2
+# Config2 (UBI)
 # 28 blocks, 3.5MiB: configuration part for firmware2
 MTD_CFG2=1
 MTD_CFG2_OFFSET=866
@@ -155,16 +155,20 @@ if [ "$HAS_BACKUP" = "1" ]; then
 	mtd_gzdump $MTD_UBOOTENV u-boot-env $MTD_UBOOTENV_LEN $MTD_UBOOTENV_OFFSET $bpath
 	mtd_gzdump $MTD_FACTORY Factory $MTD_FACTORY_LEN $MTD_FACTORY_OFFSET $bpath
 	mtd_gzdump $MTD_FIP FIP $MTD_FIP_LEN $MTD_FIP_OFFSET $bpath
-	mtd_gzdump $MTD_FWHDR1 Fwheader $MTD_FWHDR1_LEN $MTD_FWHDR1_OFFSET $bpath
-	mtd_gzdump $MTD_FW1 ubi $MTD_FW1_LEN $MTD_FW1_OFFSET $bpath
-	mtd_gzdump $MTD_CFG1 Config $MTD_CFG1_LEN $MTD_CFG1_OFFSET $bpath
-	mtd_gzdump $MTD_FWHDR2 Fwheader_2 $MTD_FWHDR2_LEN $MTD_FWHDR2_OFFSET $bpath
-	mtd_gzdump $MTD_FW2 ubi_2 $MTD_FW2_LEN $MTD_FW2_OFFSET $bpath
-	mtd_gzdump $MTD_CFG2 Config_2 $MTD_CFG2_LEN $MTD_CFG2_OFFSET $bpath
-	mtd_gzdump $MTD_PERSIST persist $MTD_PERSIST_LEN $MTD_PERSIST_OFFSET $bpath
+
+	# parts related to OEM fw, not actually needed to backup unless an OEM rollback needed
+	#mtd_gzdump $MTD_FWHDR1 Fwheader $MTD_FWHDR1_LEN $MTD_FWHDR1_OFFSET $bpath
+	#mtd_gzdump $MTD_FWHDR2 Fwheader_2 $MTD_FWHDR2_LEN $MTD_FWHDR2_OFFSET $bpath
+	#mtd_gzdump $MTD_PERSIST persist $MTD_PERSIST_LEN $MTD_PERSIST_OFFSET $bpath
+
+	# UBI parts - should be backed up with ubinize script, taking raw dumps is not a proper way
+	#mtd_gzdump $MTD_FW1 ubi $MTD_FW1_LEN $MTD_FW1_OFFSET $bpath
+	#mtd_gzdump $MTD_CFG1 Config $MTD_CFG1_LEN $MTD_CFG1_OFFSET $bpath
+	#mtd_gzdump $MTD_FW2 ubi_2 $MTD_FW2_LEN $MTD_FW2_OFFSET $bpath
+	#mtd_gzdump $MTD_CFG2 Config_2 $MTD_CFG2_LEN $MTD_CFG2_OFFSET $bpath
 
 	# Create an archive of the backup files and remove the temporary directory.
-	tar czvf /tmp/boot_backup.tar -C /tmp boot_backup && rm -rf /tmp/boot_backup
+	tar czf /tmp/boot_backup.tar -C $bpath * && rm -rf $bpath
 fi
 
 # Extract Wi-Fi calibration data before erasing mtd1. Loss of this data

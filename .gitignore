@@ -1,4 +1,5 @@
 .vscode/
+backup/
 dl/
 openwrt-ib/
 src/CMakeFiles/

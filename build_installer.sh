@@ -25,6 +25,7 @@ OPENWRT_PKGARCH="aarch64_cortex-a53"
 
 # Board-specific variables — defined by the router profile selected via --router.  Used to locate the correct OpenWrt artifacts for the target device.
 BOARD_NAME=
+REVERT_BOARD_NAME=
 BOARD_CPU=
 
 # Name of the BL2 bootloader file to embed in the installer image.
@@ -38,6 +39,9 @@ OPENWRT_TARGET_URL=""
 
 # Custom packages URL where to get pgks to embed in fw images, could be used for local build repos
 OPENWRT_CUSTOM_PKG_URL=""
+
+# Builder type
+BUILDER_TYPE="installer"
 
 # generates image with disabled backup of original mtd partitions,
 # saves space when user already has a backup of the original firmware and does not need to restore it
@@ -144,28 +148,34 @@ prepare_openwrt_ib() {
 		sha256sum -c sha256sums --ignore-missing || rm -f "$OPENWRT_SYSUPGRADE" "$OPENWRT_IB" "$OPENWRT_INITRD"
 	fi
 
-	# Resume-capable downloads — no-ops if the file is already complete. Using curl to handle 'file' URIs
-	curl --fail -L -C - -O "${OPENWRT_TARGET_URL}/${OPENWRT_INITRD}"
-	curl --fail -L -C - -O "${OPENWRT_TARGET_URL}/${OPENWRT_SYSUPGRADE}"
-	curl --fail -L -C - -O "${OPENWRT_TARGET_URL}/${OPENWRT_IB}"
+	# Resume-capable downloads — no-ops if the file is already complete. Using curl to handle 'file://' URIs
+	for url in "$@"; do
+        #echo "curl --fail -L -C - -O -- $url" || return 1
+        curl --fail -L -C - -O -- "$url" || return 1
+    done
+
+	curl --fail -L -C - -O "${OPENWRT_TARGET_URL}/${OPENWRT_INITRD}" || echo "failed to download ${OPENWRT_TARGET_URL}/${OPENWRT_INITRD}"
+	curl --fail -L -C - -O "${OPENWRT_TARGET_URL}/${OPENWRT_SYSUPGRADE}" || echo "failed to download ${OPENWRT_TARGET_URL}/${OPENWRT_SYSUPGRADE}"
+	curl --fail -L -C - -O "${OPENWRT_TARGET_URL}/${OPENWRT_IB}" || echo "failed to download ${OPENWRT_TARGET_URL}/${OPENWRT_IB}"
 
 	if (( "$SKIP_GPG_CHECK" != 1 )); then
 		# Final integrity check before we trust any of these files.
 		sha256sum -c sha256sums --ignore-missing || exit 1
 	fi
 
-	mkdir -p "${OPENWRT_DIR}" || exit 1
-	# Strip the top-level directory component so the IB contents land
-	# directly in OPENWRT_DIR regardless of the tarball's internal prefix.
-	tar -xf "${INSTALLERDIR}/dl/${OPENWRT_IB}" -C "${OPENWRT_DIR}" --strip-components=1
-
+	if [ ! -d "${OPENWRT_DIR}" ] || [ ! -r "${OPENWRT_DIR}/.config" ]; then
+		mkdir -p "${OPENWRT_DIR}" || exit 1
+		# Strip the top-level directory component so the IB contents land
+		# directly in OPENWRT_DIR regardless of the tarball's internal prefix.
+		tar -xf "${INSTALLERDIR}/dl/${OPENWRT_IB}" -C "${OPENWRT_DIR}" --strip-components=1
+	fi
 
 	# Locate dtc that was built as part of the kernel in the IB.  We need
 	# exactly the version that matches the kernel tree to avoid dtb ABI skew.
 	local num=$(ls -1 "${OPENWRT_DIR}/build_dir/target-${OPENWRT_PKGARCH}_musl/linux-${OPENWRT_TARGET}_${OPENWRT_SUBTARGET}/linux-"*"/scripts/dtc/dtc" | wc -l)
 	if (( "$num" > 1 )); then
 		echo "more then 1 kernel found under ${OPENWRT_DIR}/build_dir/target-${OPENWRT_PKGARCH}_musl/linux-${OPENWRT_TARGET}_${OPENWRT_SUBTARGET}/linux-..."
-		echo "can't determine proper version, try to purge ./openwrt-ib/build_dir/*"
+		echo "can't determine proper version, try to purge './openwrt-ib/*' or run with '-c' flag"
 		exit 1
 	fi
 
@@ -334,6 +344,7 @@ refit_image() {
 # Returns 1 (non-fatal) if no initrd blob was found in the .itb.
 # ---------------------------------------------------------------------------
 extract_initrd() {
+	echo "Extract unfitted initrd..."
 	[ -e "${WORKDIR}/initrd-1" ] || { echo "ERROR: ${WORKDIR}/initrd-1 does not exist, unfit failed?" >&2; return 1; }
 	[ -e "${WORKDIR}/initrd" ] && rm -rf "${WORKDIR}/initrd"
 	mkdir "${WORKDIR}/initrd"
@@ -445,12 +456,19 @@ bundle_initrd() {
 		OPENWRT_CUSTOM_PKG_URL=""
 	fi
 
+	echo "Removing optional packages..."
 	# Remove packages to shrink the initrd (Wi-Fi drivers are irrelevant
 	# during a recovery/install boot and consume several MiB).
-	[[ ${#OPENWRT_REMOVE_PACKAGES[@]} -gt 0 ]] && \
-		IPKG_NO_SCRIPT=1 IPKG_INSTROOT="${WORKDIR}/initrd" \
-		"${APK}" --no-scripts --no-logfile --root "${WORKDIR}/initrd" \
-		del "${OPENWRT_REMOVE_PACKAGES[@]}"
+	"${APK}" --no-logfile --root "${WORKDIR}/initrd" info
+	
+	[[ ${#OPENWRT_REMOVE_PACKAGES[@]} -gt 0 ]] && {
+		# use iterator here since an attempt to remove non-existing pkg would fail
+		# and there might be various fw images, including custom ones, we should not fail here
+		for pkg in "${OPENWRT_REMOVE_PACKAGES[@]}"; do
+			IPKG_NO_SCRIPT=1 IPKG_INSTROOT="${WORKDIR}/initrd" \
+			"${APK}" --no-scripts --no-logfile --root "${WORKDIR}/initrd" del $pkg 2>/dev/null || echo "unable to remove: $pkg"
+		done
+	}
 
 	# Refresh the APK index inside the initrd so subsequent add operations
 	# resolve the correct package versions from the feed.
@@ -481,11 +499,24 @@ bundle_initrd() {
 			# then copy the bootloader blobs (bl2, FIP) and recovery .itb into
 			# /installer inside the initrd so the init script can find them.
 			mkdir -p "${WORKDIR}/initrd/installer" "${WORKDIR}/initrd/lib/"
-			cp -avr "${INSTALLERDIR}/files/lib" "${WORKDIR}/initrd/"
-			cp -v "${INSTALLERDIR}/files/installer/install_func" "${WORKDIR}/initrd/installer/"
-			cp -v "${INSTALLERDIR}/files/installer/${BOARD_NAME}_install.sh" "${WORKDIR}/initrd/installer/install.sh"
+			cp -ar "${INSTALLERDIR}/files/lib" "${WORKDIR}/initrd/"
+			cp "${INSTALLERDIR}/files/installer/install_func" "${WORKDIR}/initrd/installer/"
+			cp "${INSTALLERDIR}/files/installer/brest.sh" "${WORKDIR}/initrd/installer/"
+			cp "${INSTALLERDIR}/files/installer/${BOARD_NAME}_install.sh" "${WORKDIR}/initrd/installer/install.sh"
 			# disable backup of original mtd partitions if set
 			(( "$NO_BACKUP" == 1 )) && sed -i 's/^HAS_BACKUP=1/HAS_BACKUP=0/g' "${WORKDIR}/initrd/installer/install.sh"
+			cp -v "$@" "${WORKDIR}/initrd/installer"
+			;;
+		uninstaller)
+			# Overlay the uninstaller scripts from the repo's files/ directory,
+			# then copy the bootloader blobs (bl2, FIP) and recovery .itb into
+			# /installer inside the initrd so the init script can find them.
+			mkdir -p "${WORKDIR}/initrd/installer" "${WORKDIR}/initrd/lib/"
+			cp -ar "${INSTALLERDIR}/files/lib" "${WORKDIR}/initrd/"
+			cp "${INSTALLERDIR}/files/installer/install_func" "${WORKDIR}/initrd/installer/"
+			cp "${INSTALLERDIR}/files/installer/brest.sh" "${WORKDIR}/initrd/installer/"
+			cp "${INSTALLERDIR}/files/installer/${BOARD_NAME}_uninstall.sh" "${WORKDIR}/initrd/installer/uninstall.sh"
+			cp -ar ${INSTALLERDIR}/backup ${WORKDIR}/initrd/installer/
 			cp -v "$@" "${WORKDIR}/initrd/installer"
 			;;
 	esac
@@ -506,7 +537,7 @@ bundle_initrd() {
 		recovery)
 			refit_image 128k
 			;;
-		installer)
+		installer|uninstaller)
 			# Patch the dtb so the installer can access every MTD partition.
 			allow_mtd_write
 			# Force a standard inline FIT layout for the installer regardless of
@@ -561,7 +592,8 @@ ubi_installer() {
 	OPENWRT_INITRD="openwrt${tag_suffix}-${OPENWRT_TARGET}-${OPENWRT_SUBTARGET}-${BOARD_NAME}-initramfs-recovery.itb"
 	OPENWRT_SYSUPGRADE="openwrt${tag_suffix}-${OPENWRT_TARGET}-${OPENWRT_SUBTARGET}-${BOARD_NAME}-squashfs-sysupgrade.itb"
 
-	prepare_openwrt_ib
+	# down load required files and prepare IB
+	prepare_openwrt_ib "${OPENWRT_TARGET_URL}/${OPENWRT_INITRD}" "${OPENWRT_TARGET_URL}/${OPENWRT_SYSUPGRADE}" "${OPENWRT_TARGET_URL}/${OPENWRT_IB}"
 
 	# Sanity-check that this IB actually includes the 'fitblk'
 	# package.  fitblk is required by the installer to write FIT images to
@@ -580,7 +612,7 @@ ubi_installer() {
 
 	# --- Step 2: unmodified sysupgrade image ---
 	echo "== STEP 2: Copying sysupgrade image..."
-	cp "${INSTALLERDIR}/dl/${OPENWRT_SYSUPGRADE}" "${DESTDIR}"
+	cp -v "${INSTALLERDIR}/dl/${OPENWRT_SYSUPGRADE}" "${DESTDIR}"
 
 	# --- Step 3: installer image ---
 	echo "== STEP 3: Building installer image..."
@@ -598,7 +630,83 @@ ubi_installer() {
 
 
 	# remove the temporary workdir with prepared initrd and unpacked .itb
+	#rm -r "${WORKDIR}"
+}
+
+# ---------------------------------------------------------------------------
+# uninstaller  (entry point)
+#
+# Ties all of the above together for the build:
+#
+#   Step 1 — Build the recovery .itb (LuCI included, Wi-Fi firmware stripped)
+#             Saved directly to DESTDIR for use as a standalone recovery image.
+#
+#   Step 2 — Copy the upstream sysupgrade .itb to DESTDIR unchanged; it is
+#             the final OpenWrt image that the installer will flash.
+#
+#   Step 3 — Build the installer .itb which embeds:
+#               • BL2 (ARM Trusted Firmware first-stage bootloader)
+#               • FIP (Firmware Image Package: BL31 + U-Boot as BL33)
+#               • The recovery .itb built in step 1
+#             The installer init script writes BL2 to raw NAND, then
+#             flashes the FIP, then boots into the new U-Boot which finally
+#             flashes the sysupgrade image.
+# ---------------------------------------------------------------------------
+ubi_uninstaller() {
+	local tag_suffix=""
+
+	# $OPENWRT_TARGET_URL might be overriden via cmd line arg
+	if [[ -z "$OPENWRT_TARGET_URL" ]]; then
+		if [[ "$OPENWRT_RELEASE" == "snapshot" ]]; then
+			echo "Using OpenWrt snapshot build"
+			OPENWRT_TARGET_URL="https://downloads.openwrt.org/snapshots/targets/${OPENWRT_TARGET}/${OPENWRT_SUBTARGET}"
+		else
+			echo "Using OpenWrt release ${OPENWRT_RELEASE}"
+			OPENWRT_TARGET_URL="https://downloads.openwrt.org/releases/${OPENWRT_RELEASE}/targets/${OPENWRT_TARGET}/${OPENWRT_SUBTARGET}"
+			tag_suffix="-${OPENWRT_RELEASE}"
+		fi
+	fi
+
+	OPENWRT_IB="openwrt-imagebuilder${tag_suffix}-${OPENWRT_TARGET}-${OPENWRT_SUBTARGET}.Linux-x86_64.tar.zst"
+	#OPENWRT_INITRD="openwrt${tag_suffix}-${OPENWRT_TARGET}-${OPENWRT_SUBTARGET}-${BOARD_NAME}-initramfs-recovery.itb"
+	OPENWRT_INITRD="openwrt${tag_suffix}-${OPENWRT_TARGET}-${OPENWRT_SUBTARGET}-${BOARD_NAME}-initramfs-kernel.bin"
+	OPENWRT_SYSUPGRADE="openwrt${tag_suffix}-${OPENWRT_TARGET}-${OPENWRT_SUBTARGET}-${BOARD_NAME}-squashfs-sysupgrade.bin"
+
+	# down load required files and prepare IB
+	prepare_openwrt_ib "${OPENWRT_TARGET_URL}/${OPENWRT_INITRD}" "${OPENWRT_TARGET_URL}/${OPENWRT_SYSUPGRADE}" "${OPENWRT_TARGET_URL}/${OPENWRT_IB}"
+
+	# Sanity-check that this IB actually includes the 'fitblk'
+	# package.  fitblk is required by the installer to write FIT images to
+	# MTD block devices; older versions may predate the feature.
+	make -C ${OPENWRT_DIR} info | grep "Default Packages:" | grep -q fitblk || {
+		echo "ImageBuilder is outdated and not in sync with installer."
+		echo "Please re-run once fitblk changes are included in ${OPENWRT_RELEASE} build."
+		exit 1
+	}
+
+	# --- Step 1: recovery image ---
+	echo "== STEP 1: Building recovery image..."
+	bundle_initrd recovery "${INSTALLERDIR}/dl/${OPENWRT_INITRD}"
+	mv "${WORKDIR}/${FILEBASE}.itb" "${DESTDIR}"
 	rm -r "${WORKDIR}"
+
+	# --- Step 2: unmodified sysupgrade image ---
+	echo "== STEP 2: Copying sysupgrade image: {OPENWRT_SYSUPGRADE}"
+	cp "${INSTALLERDIR}/dl/${OPENWRT_SYSUPGRADE}" "${DESTDIR}"
+
+	# --- Step 3: uninstaller image ---
+	echo "== STEP 3: Building un-installer image: ${DESTDIR}/${FILEBASE}.itb"
+	# Positional args after the imgtype and base .itb are extra files that
+	# bundle_initrd copies into /installer inside the initrd:
+	bundle_initrd uninstaller "${INSTALLERDIR}/dl/${OPENWRT_INITRD}" \
+	 	"${DESTDIR}/${FILEBASE}.itb"
+
+	mv "${WORKDIR}/${FILEBASE}-uninstaller"* "${DESTDIR}"
+
+	# remove the temporary workdir with prepared initrd and unpacked .itb
+	rm -rf "${WORKDIR}"
+
+	echo "Flash ${FILEBASE}-uninstaller image to rollback your layout to stock OpenWrt/OEM version"
 }
 
 
@@ -615,8 +723,9 @@ set_router_profile (){
 		OPENWRT_REMOVE_PACKAGES+=(kmod-mt7915e kmod-${BOARD_CPU}-firmware ${BOARD_CPU}-wo-firmware kmod-mt76-connac kmod-mt76-core)
         ;;
 	elecom_wrc-x6000qs)
-		echo "WARN: Router is not yet added in official OpenWrt tree, pls specify local ImageBuilder and image path via '--url' arg"
+		echo "WARN: Router is not yet added in official OpenWrt tree, pls specify local ImageBuilder and image path via '--pkg-url'/'--img-url' args"
 		BOARD_NAME="elecom_wrc-x6000qs-ubi"
+		REVERT_BOARD_NAME="elecom_wrc-x6000qs"
 		BOARD_CPU="mt7986"
 		PRELOADER="${BOARD_CPU}-spim-nand-ubi-1m-ddr3-bl2.img"
 		OPENWRT_REMOVE_PACKAGES+=(kmod-mt7915e kmod-${BOARD_CPU}-firmware ${BOARD_CPU}-wo-firmware kmod-mt76-connac kmod-mt76-core)
@@ -670,6 +779,7 @@ show_help () {
 	echo "                              (WARN! never disable checks unless you are a developer or working with a local IB builds)"
 	echo "  --no-backup                 generates image with disabled backup of original mtd partitions,"
 	echo "								saves space on flash if you already have a backup of the original partitions"
+	echo "  -c|--clear					clear downloaded files, fetch all from scratch"
 	echo
 	echo "  -h, --help                  Show this help message"
 }
@@ -705,6 +815,15 @@ while [[ $# -gt 0 ]]; do
             NO_BACKUP=1
             shift
             ;;
+		-c|--clear)
+			rm -rf ./dl
+			rm -rf ./openwrt-ib
+			shift
+			;;
+		-u|--uninstaller)
+			BUILDER_TYPE="uninstaller"
+			shift
+			;;
         -h|--help)
             show_help
             exit 0
@@ -726,4 +845,13 @@ done
 
 set_router_profile ${router:-"unknown"}
 
-ubi_installer
+case "${BUILDER_TYPE}" in
+	uninstaller)
+		BOARD_NAME=$REVERT_BOARD_NAME
+		ubi_uninstaller
+		;;
+	*)
+		ubi_installer
+		;;
+esac
+
