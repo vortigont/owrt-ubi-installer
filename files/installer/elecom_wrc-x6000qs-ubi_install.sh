@@ -209,4 +209,4 @@ led_done
 
 sleep 5
 
-##reboot -f
+reboot -f

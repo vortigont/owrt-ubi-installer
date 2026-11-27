@@ -630,7 +630,7 @@ ubi_installer() {
 
 
 	# remove the temporary workdir with prepared initrd and unpacked .itb
-	#rm -r "${WORKDIR}"
+	rm -r "${WORKDIR}"
 }
 
 # ---------------------------------------------------------------------------

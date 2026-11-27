@@ -38,9 +38,11 @@ You'll need the below to use the script to generate the installer image:
 
 ## Building image for Elecom WRC-x6000qs
 
-OpenWrt support for Elecom WRC-x6000qs is not yet present for major releases, only [snapshot](https://downloads.openwrt.org/snapshots/targets/mediatek/filogic/) builds are available.
+OpenWrt support for Elecom WRC-x6000qs is not yet present for major releases, only [snapshot](https://downloads.openwrt.org/snapshots/targets/mediatek/filogic/) builds are available that lacks UBI images version. PR is pending https://github.com/openwrt/openwrt/pull/26971
 
-**If you are not interested in building yourself**, the pre-built files are available [here](https://github.com/vortigont/owrt-ubi-installer/releases). Download it to your PC and proceed with [Installing OpenWrt](#installing-openwrt).
+> [!NOTE]
+> **If you are not interested in building yourself**, the pre-built files are available [here](https://github.com/vortigont/owrt-ubi-installer/releases/tag/wrc-x6000qs_v1). Download it to your PC and proceed with [Installing OpenWrt](#installing-openwrt).
+
 
 You'd have to build `imagebuilder` yourself using patches from https://github.com/vortigont/openwrt/tree/elecom_wrc-x6000qs_ubi
 Build the snapshot image for Elecom WRC-x6000qs as per OpenWrt build instructions. You'd have to set a web server to provide packages
